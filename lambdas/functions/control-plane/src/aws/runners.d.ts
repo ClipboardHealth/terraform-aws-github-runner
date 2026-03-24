@@ -1,4 +1,4 @@
-import { DefaultTargetCapacityType, SpotAllocationStrategy } from '@aws-sdk/client-ec2';
+import { DefaultTargetCapacityType, FleetOnDemandAllocationStrategy, SpotAllocationStrategy } from '@aws-sdk/client-ec2';
 
 export type RunnerType = 'Org' | 'Repo';
 
@@ -39,7 +39,7 @@ export interface RunnerInputParameters {
     instanceTypes: string[];
     targetCapacityType: DefaultTargetCapacityType;
     maxSpotPrice?: string;
-    instanceAllocationStrategy: SpotAllocationStrategy;
+    instanceAllocationStrategy: SpotAllocationStrategy | FleetOnDemandAllocationStrategy;
   };
   numberOfRunners: number;
   amiIdSsmParameterName?: string;
