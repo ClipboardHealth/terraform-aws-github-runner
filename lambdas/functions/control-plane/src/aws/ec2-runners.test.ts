@@ -113,6 +113,22 @@ describe('list instances', () => {
     });
   });
 
+  it('returns the persisted idle-detection timestamp', async () => {
+    const instances = structuredClone(mockRunningInstances);
+    instances.Reservations![0].Instances![0].Tags!.push({
+      Key: 'ghr:idle_detected_at',
+      Value: '2026-09-02T12:00:00.000Z',
+    });
+    mockEC2Client.on(DescribeInstancesCommand).resolves(instances);
+
+    await expect(listEC2Runners()).resolves.toContainEqual(
+      expect.objectContaining({
+        instanceId: 'i-1234',
+        idleDetectedAt: '2026-09-02T12:00:00.000Z',
+      }),
+    );
+  });
+
   it('check orphan tag.', async () => {
     const instances: DescribeInstancesResult = mockRunningInstances;
     instances.Reservations![0].Instances![0].Tags!.push({

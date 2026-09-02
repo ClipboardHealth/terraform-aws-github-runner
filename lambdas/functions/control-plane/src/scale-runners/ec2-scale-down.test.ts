@@ -88,6 +88,7 @@ interface RunnerTestItem extends RunnerList {
   registered: boolean;
   orphan: boolean;
   shouldBeTerminated: boolean;
+  idleDetectedAt?: string;
 }
 
 describe('Scale down runners', () => {
@@ -726,6 +727,163 @@ describe('Scale down runners', () => {
           }
         });
       });
+    });
+  });
+
+  describe('with an idle confirmation window', () => {
+    const confirmationSeconds = 900;
+
+    beforeEach(() => {
+      process.env.SCALE_DOWN_IDLE_CONFIRMATION_SECONDS = confirmationSeconds.toString();
+    });
+
+    it('defers termination on the first not-busy observation', async () => {
+      const runner = createRunnerTestData(
+        'idle-first-observation',
+        'Org',
+        MINIMUM_TIME_RUNNING_IN_MINUTES + 1,
+        true,
+        false,
+        false,
+      );
+      mockGitHubRunners([runner]);
+      mockAwsRunners([runner]);
+
+      await scaleDown();
+
+      expect(mockTagRunners).toHaveBeenCalledWith(runner.instanceId, [
+        { Key: 'ghr:idle_detected_at', Value: expect.any(String) },
+      ]);
+      expect(mockOctokit.actions.deleteSelfHostedRunnerFromOrg).not.toHaveBeenCalled();
+      expect(mockTerminateRunners).not.toHaveBeenCalled();
+    });
+
+    it('terminates after a second not-busy observation spans the window', async () => {
+      const runner = createRunnerTestData(
+        'idle-confirmed',
+        'Org',
+        MINIMUM_TIME_RUNNING_IN_MINUTES + 1,
+        true,
+        false,
+        true,
+      );
+      runner.idleDetectedAt = new Date(Date.now() - (confirmationSeconds + 1) * 1000).toISOString();
+      mockGitHubRunners([runner]);
+      mockAwsRunners([runner]);
+
+      await scaleDown();
+
+      expect(mockOctokit.actions.deleteSelfHostedRunnerFromOrg).toHaveBeenCalled();
+      expect(mockTerminateRunners).toHaveBeenCalledWith(runner.instanceId);
+    });
+
+    it('continues deferring while the confirmation window has not elapsed', async () => {
+      const runner = createRunnerTestData(
+        'idle-within-window',
+        'Org',
+        MINIMUM_TIME_RUNNING_IN_MINUTES + 1,
+        true,
+        false,
+        false,
+      );
+      runner.idleDetectedAt = new Date(Date.now() - (confirmationSeconds - 60) * 1000).toISOString();
+      mockGitHubRunners([runner]);
+      mockAwsRunners([runner]);
+
+      await scaleDown();
+
+      expect(mockTagRunners).not.toHaveBeenCalled();
+      expect(mockOctokit.actions.deleteSelfHostedRunnerFromOrg).not.toHaveBeenCalled();
+      expect(mockTerminateRunners).not.toHaveBeenCalled();
+    });
+
+    it('keeps single-observation scale-down behavior when confirmation is disabled', async () => {
+      process.env.SCALE_DOWN_IDLE_CONFIRMATION_SECONDS = '0';
+      const runner = createRunnerTestData(
+        'idle-confirmation-disabled',
+        'Org',
+        MINIMUM_TIME_RUNNING_IN_MINUTES + 1,
+        true,
+        false,
+        true,
+      );
+      mockGitHubRunners([runner]);
+      mockAwsRunners([runner]);
+
+      await scaleDown();
+
+      expect(mockTagRunners).not.toHaveBeenCalled();
+      expect(mockOctokit.actions.deleteSelfHostedRunnerFromOrg).toHaveBeenCalled();
+      expect(mockTerminateRunners).toHaveBeenCalledWith(runner.instanceId);
+    });
+
+    it('resets confirmation when the runner reports busy', async () => {
+      const runner = createRunnerTestData(
+        'busy-after-idle',
+        'Org',
+        MINIMUM_TIME_RUNNING_IN_MINUTES + 1,
+        true,
+        false,
+        false,
+      );
+      runner.idleDetectedAt = new Date(Date.now() - (confirmationSeconds + 1) * 1000).toISOString();
+      mockGitHubRunners([runner]);
+      mockAwsRunners([runner]);
+
+      await scaleDown();
+
+      expect(mockUntagRunners).toHaveBeenCalledWith(runner.instanceId, [{ Key: 'ghr:idle_detected_at' }]);
+      expect(mockTerminateRunners).not.toHaveBeenCalled();
+    });
+
+    it('clears a stale confirmation marker when pool policy keeps the runner idle', async () => {
+      process.env.SCALE_DOWN_CONFIG = JSON.stringify([
+        {
+          idleCount: 1,
+          cron: '* * * * * *',
+          timeZone: 'UTC',
+          evictionStrategy: 'oldest_first',
+        },
+      ]);
+      const runner = createRunnerTestData(
+        'idle-kept-by-policy',
+        'Org',
+        MINIMUM_TIME_RUNNING_IN_MINUTES + 1,
+        true,
+        false,
+        false,
+      );
+      runner.idleDetectedAt = new Date(Date.now() - (confirmationSeconds + 1) * 1000).toISOString();
+      mockGitHubRunners([runner]);
+      mockAwsRunners([runner]);
+
+      await scaleDown();
+
+      expect(mockUntagRunners).toHaveBeenCalledWith(runner.instanceId, [{ Key: 'ghr:idle_detected_at' }]);
+      expect(mockOctokit.actions.getSelfHostedRunnerForOrg).not.toHaveBeenCalled();
+      expect(mockTerminateRunners).not.toHaveBeenCalled();
+    });
+
+    it('restarts confirmation when an existing marker is invalid', async () => {
+      const runner = createRunnerTestData(
+        'idle-invalid-marker',
+        'Org',
+        MINIMUM_TIME_RUNNING_IN_MINUTES + 1,
+        true,
+        false,
+        false,
+      );
+      runner.idleDetectedAt = 'not-an-iso-timestamp';
+      mockGitHubRunners([runner]);
+      mockAwsRunners([runner]);
+
+      await scaleDown();
+
+      expect(mockTagRunners).toHaveBeenCalledWith(runner.instanceId, [
+        { Key: 'ghr:idle_detected_at', Value: expect.any(String) },
+      ]);
+      expect(mockOctokit.actions.deleteSelfHostedRunnerFromOrg).not.toHaveBeenCalled();
+      expect(mockTerminateRunners).not.toHaveBeenCalled();
     });
   });
 });

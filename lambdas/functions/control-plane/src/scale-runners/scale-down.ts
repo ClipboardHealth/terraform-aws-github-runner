@@ -160,6 +160,57 @@ async function deleteGitHubRunner(
   }
 }
 
+function idleConfirmationSeconds(): number {
+  const rawValue = process.env.SCALE_DOWN_IDLE_CONFIRMATION_SECONDS;
+  const parsedValue = rawValue === undefined || rawValue === '' ? 0 : Number(rawValue);
+  return Number.isFinite(parsedValue) && parsedValue > 0 ? parsedValue : 0;
+}
+
+function supportsIdleConfirmation(runnerProvider: ScaleDownRunnerProvider): boolean {
+  return runnerProvider.markIdle !== undefined && runnerProvider.unmarkIdle !== undefined;
+}
+
+async function idleConfirmed(runner: RunnerInfo, runnerProvider: ScaleDownRunnerProvider): Promise<boolean> {
+  const confirmationSeconds = idleConfirmationSeconds();
+  if (confirmationSeconds === 0 || !supportsIdleConfirmation(runnerProvider)) {
+    return true;
+  }
+
+  const idleDetectedAt = runner.idleDetectedAt;
+  const idleForSeconds = idleDetectedAt ? (Date.now() - Date.parse(idleDetectedAt)) / 1000 : Number.NaN;
+  if (!Number.isFinite(idleForSeconds) || idleForSeconds < 0) {
+    await runnerProvider.markIdle?.(runner.id, new Date().toISOString());
+    logger.info(
+      `Runner '${runner.id}' reads idle; deferring termination for at least ` +
+        `${confirmationSeconds}s to confirm the busy state is not stale.`,
+    );
+    return false;
+  }
+
+  if (idleForSeconds < confirmationSeconds) {
+    logger.info(
+      `Runner '${runner.id}' reads idle since '${idleDetectedAt}' ` +
+        `(${Math.round(idleForSeconds)}s < ${confirmationSeconds}s); deferring termination.`,
+    );
+    return false;
+  }
+
+  logger.info(
+    `Runner '${runner.id}' confirmed idle since '${idleDetectedAt}' ` +
+      `(${Math.round(idleForSeconds)}s >= ${confirmationSeconds}s).`,
+  );
+  return true;
+}
+
+async function clearIdleDetection(runner: RunnerInfo, runnerProvider: ScaleDownRunnerProvider): Promise<void> {
+  if (!runner.idleDetectedAt || !runnerProvider.unmarkIdle) {
+    return;
+  }
+
+  await runnerProvider.unmarkIdle(runner.id);
+  logger.info(`Runner '${runner.id}' is no longer a scale-down candidate; idle confirmation reset.`);
+}
+
 async function removeRunner(
   runner: RunnerInfo,
   ghRunnerIds: number[],
@@ -182,6 +233,10 @@ async function removeRunner(
     );
 
     if (states.every((busy) => busy === false)) {
+      if (!(await idleConfirmed(runner, runnerProvider))) {
+        return;
+      }
+
       const results = await Promise.all(
         ghRunnerIds.map((ghRunnerId) => deleteGitHubRunner(githubInstallationClient, runner, ghRunnerId)),
       );
@@ -203,6 +258,7 @@ async function removeRunner(
         );
       }
     } else {
+      await clearIdleDetection(runner, runnerProvider);
       logger.info(`Runner '${runner.id}' cannot be de-registered, because it is still busy.`);
     }
   } catch (e) {
@@ -230,6 +286,7 @@ async function evaluateAndRemoveRunners(
     logger.debug(`Active GitHub runners with owner tag: '${ownerTag}': ${JSON.stringify(ownerRunners)}`);
     for (const runner of ownerRunners) {
       if (runner.bypassRemoval) {
+        await clearIdleDetection(runner, runnerProvider);
         logger.debug(`Runner '${runner.id}' has bypass-removal tag set, skipping evaluation.`);
         continue;
       }
@@ -241,6 +298,7 @@ async function evaluateAndRemoveRunners(
         if (runnerMinimumTimeExceeded(runner)) {
           if (idleCounter > 0) {
             idleCounter--;
+            await clearIdleDetection(runner, runnerProvider);
             logger.info(`Runner '${runner.id}' will be kept idle.`);
           } else {
             logger.info(`Terminating all non busy runners.`);
@@ -250,11 +308,16 @@ async function evaluateAndRemoveRunners(
               runnerProvider,
             );
           }
+        } else {
+          await clearIdleDetection(runner, runnerProvider);
         }
-      } else if (runnerProvider.bootTimeExceeded(runner)) {
-        await markOrphan(runner.id, runnerProvider);
       } else {
-        logger.debug(`Runner ${runner.id} has not yet booted.`);
+        await clearIdleDetection(runner, runnerProvider);
+        if (runnerProvider.bootTimeExceeded(runner)) {
+          await markOrphan(runner.id, runnerProvider);
+        } else {
+          logger.debug(`Runner ${runner.id} has not yet booted.`);
+        }
       }
     }
   }

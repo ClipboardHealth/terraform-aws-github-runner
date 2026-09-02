@@ -10,6 +10,7 @@ export interface RunnerList {
   orphan?: boolean;
   githubRunnerId?: string;
   bypassRemoval?: boolean;
+  idleDetectedAt?: string;
 }
 
 export interface RunnerInfo extends RunnerList {
@@ -22,5 +23,9 @@ export interface ScaleDownRunnerProvider extends RunnerProvider {
   bootTimeExceeded(runner: RunnerInfo): boolean;
   markOrphan(id: string): Promise<void>;
   unmarkOrphan(id: string): Promise<void>;
+  /** Persist the first not-busy observation for a later scale-down invocation. */
+  markIdle?(id: string, detectedAt: string): Promise<void>;
+  /** Remove a prior observation when the runner is no longer a scale-down candidate. */
+  unmarkIdle?(id: string): Promise<void>;
   terminate(id: string): Promise<void>;
 }
